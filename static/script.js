@@ -576,6 +576,8 @@ function enterGame(roomId) {
   moveLog = [];
   lastLoggedMove = null;
   _lastAnimatedMoveKey = null;
+  resetPiles();
+  cancelThrow();
 
   // Reset render cache for new game
   _lastRendered = {
@@ -733,7 +735,9 @@ async function playCard(cardIdx) {
   if (!resp.ok) {
     const err = await resp.json();
     console.error(err.detail || 'Invalid move');
+    return false;
   }
+  return true;
   // State update (including capture_options if needed) delivered via WebSocket
 }
 
@@ -827,7 +831,7 @@ function makeCard(card, isValid, isPlayed) {
   el.appendChild(bot);
 
   if (isValid) {
-    el.onclick = () => playCard(card.idx);
+    el.onclick = () => { if (!_suppressClick && !pendingThrow) playCard(card.idx); };
     el.title = `Play ${label} di ${card.suit}`;
   }
   return el;
@@ -1018,6 +1022,9 @@ function renderState() {
       tableEl.appendChild(el);
     });
   }
+
+  _tableDims = _tableDimsNow();
+  renderPiles();
 
   // If capture options are pending, re-show the modal (e.g. after page refresh)
   if (gs.capture_options && gs.capture_options.length > 1) {
@@ -1263,14 +1270,124 @@ async function _pushApart(seat, newCardIdx, ghost, hand) {
   tableCardPositions[newCardIdx] = { ...newPos, x: nx, y: ny };
   const gc = { x: tcRect.left + nx + cW / 2, y: tcRect.top + ny + cH / 2 };
   _go(ghost, gc.x, gc.y, T, { easing: ease });
-  _goHand(hand, gc.x, gc.y, T, { easing: ease });
+  if (hand) _goHand(hand, gc.x, gc.y, T, { easing: ease });
   await _sleep(T + 30);
 }
 
-// Scopa: a small broom sweeps the pile toward the player in one flowing stroke
-function _sweep(cards, from, seatC, u, ms) {
+// ── Taken-card piles (one per team) ───────────────────────────────────────
+// A team's pile sits in a side column near the first of its players that took something. Newly taken cards
+// land on it chaotically; the next time a member of that team takes cards, the hand squares the pile up first.
+const PILE_MAX = 14;
+const pileState = { hand: -1, 0: { seat: null, items: [], nodes: [] }, 1: { seat: null, items: [], nodes: [] } };
+
+function pileCenter(seat) {
+  const b = document.getElementById('board').getBoundingClientRect();
+  const { width: cW, height: cH } = _getCardSize();
+  const L = b.left + cW / 2 + 6, R = b.right - cW / 2 - 6;
+  const top = b.top + 58 + cH / 2, bot = b.bottom - cH - 40 - cH / 2;
+  return { 0: { x: R, y: bot }, 1: { x: L, y: bot }, 2: { x: L, y: top }, 3: { x: R, y: top } }[seat];
+}
+
+function _pileTransform(it, i) {
+  if (it.tidy) return `translate(${(-i * 0.7).toFixed(1)}px, ${(-i * 0.9).toFixed(1)}px) rotate(0deg)`;
+  return `translate(calc(var(--cw) * ${it.dx.toFixed(3)}), calc(var(--cw) * ${it.dy.toFixed(3)})) rotate(${it.rot.toFixed(1)}deg)`;
+}
+
+function resetPiles() {
+  pileState.hand = -1;
+  [0, 1].forEach(t => {
+    pileState[t].seat = null; pileState[t].items = []; pileState[t].nodes = [];
+    const el = document.getElementById(`pile-${t}`);
+    if (el) el.innerHTML = '<div class="pile-count"></div>';
+  });
+}
+
+function renderPiles() {
+  const gs = gameState;
+  if (!gs) return;
+  if (gs.hand_number !== pileState.hand) { resetPiles(); pileState.hand = gs.hand_number; }
+  const b = document.getElementById('board').getBoundingClientRect();
+  [0, 1].forEach(t => {
+    const n = gs.taken_counts?.[t] ?? 0;
+    const P = pileState[t];
+    const el = document.getElementById(`pile-${t}`);
+    const vis = Math.min(n, PILE_MAX);
+    while (P.items.length < vis) P.items.push({ dx: (Math.random() - 0.5) * 0.45, dy: (Math.random() - 0.5) * 0.45, rot: (Math.random() - 0.5) * 70, tidy: false, fresh: true });
+    while (P.items.length > vis) { P.items.pop(); const nd = P.nodes.pop(); if (nd) nd.remove(); }
+    if (n > 0 && P.seat === null) P.seat = t;          // e.g. after a reload: default to the team's first seat
+    el.style.display = n > 0 ? 'block' : 'none';
+    if (n <= 0) return;
+    const c = pileCenter(P.seat);
+    el.style.left = (c.x - b.left) + 'px';
+    el.style.top  = (c.y - b.top) + 'px';
+    const countEl = el.querySelector('.pile-count');
+    countEl.textContent = n;
+    while (P.nodes.length < P.items.length) {
+      const nd = makeCardBack();
+      el.insertBefore(nd, countEl);
+      P.nodes.push(nd);
+    }
+    P.items.forEach((it, i) => {
+      const nd = P.nodes[i];
+      nd.style.transform = _pileTransform(it, i);
+      nd.style.zIndex = i;
+      if (it.fresh) { it.fresh = false; nd.classList.add('fresh'); setTimeout(() => nd.classList.remove('fresh'), 260); }
+    });
+  });
+}
+
+// A member of the team touches the pile: it becomes one tidy stack
+function tidyPile(t) {
+  const P = pileState[t];
+  P.items.forEach(it => { it.tidy = true; });
+  P.items.forEach((it, i) => { if (P.nodes[i]) P.nodes[i].style.transform = _pileTransform(it, i); });
+}
+
+// ── Taking cards ─────────────────────────────────────────────────────────
+// Everything in `group` is moved by the same transition, `followers` ride along under the leader
+function _moveGroup(leader, followers, hand, cx, cy, ms, easing = 'ease-in-out') {
+  _go(leader, cx, cy, ms, { easing });
+  followers.forEach((f, i) => _go(f, cx + (i + 1) * 1.6, cy - (i + 1) * 1.6, ms, { easing }));
+  if (hand) _goHand(hand, cx, cy, ms, { easing });
+}
+
+// The leader card (held by the hand) goes to each card in `targets` (nearest first) and picks it up
+async function _collect(leader, followers, hand, targets) {
+  const remaining = [...targets];
+  const hop = Math.max(110, Math.min(240, 900 / Math.max(remaining.length, 1)));
+  while (remaining.length) {
+    const p = leader._p;
+    remaining.sort((a, b) => Math.hypot(a._p.cx - p.cx, a._p.cy - p.cy) - Math.hypot(b._p.cx - p.cx, b._p.cy - p.cy));
+    const g = remaining.shift();
+    _moveGroup(leader, followers, hand, g._p.cx, g._p.cy, hop);
+    await _sleep(hop + 15);
+    g.style.transition = 'box-shadow 120ms'; g.style.boxShadow = '0 8px 18px rgba(0,0,0,0.5)';   // picked up
+    followers.push(g);
+    await _sleep(50);
+  }
+}
+
+// The hand carries the picked-up cards back to the team's pile and drops them on it
+async function _toPile(leader, followers, hand, pileC, team, handSeat) {
+  const { width: cW } = _getCardSize();
+  _moveGroup(leader, followers, hand, pileC.x, pileC.y, 520, 'cubic-bezier(0.45, 0, 0.2, 1)');
+  await _sleep(440);
+  tidyPile(team);                                           // the hand reaches the pile and squares it up
+  await _sleep(100);
+  const all = [leader, ...followers];
+  all.forEach((g, i) => _go(g, pileC.x + (Math.random() - 0.5) * cW * 0.3, pileC.y + (Math.random() - 0.5) * cW * 0.3, 170, {
+    easing: 'ease-out', opacity: 0, rot: (Math.random() - 0.5) * 60, delay: i * 25, fadeDelay: 60,
+  }));
+  await _sleep(170 + all.length * 25 + 20);
+  if (hand) await _handAway(hand, handSeat);
+}
+
+// Scopa: a small broom sweeps the cards toward the pile in one flowing stroke
+function _sweep(cards, from, endC, ms) {
   return new Promise(resolve => {
     const { width: cW } = _getCardSize();
+    const dx0 = endC.x - from.x, dy0 = endC.y - from.y, n0 = Math.hypot(dx0, dy0) || 1;
+    const u = [dx0 / n0, dy0 / n0];
     const broom = document.createElement('div');
     broom.className = 'ghost-broom';
     broom.innerHTML = BROOM_SVG;
@@ -1280,9 +1397,9 @@ function _sweep(cards, from, seatC, u, ms) {
 
     const lead = cW * 1.2;                                   // broom starts behind the pile
     const S = { x: from.x - u[0] * lead, y: from.y - u[1] * lead };
-    const E = { x: seatC.x, y: seatC.y };
+    const E = endC;
     const px = -u[1], py = u[0];                             // sideways
-    const baseAngle = Math.atan2(-u[0], u[1]) * 180 / Math.PI;   // bristles lead toward the player
+    const baseAngle = Math.atan2(-u[0], u[1]) * 180 / Math.PI;   // bristles lead toward the pile
     const f0 = Math.min(0.35, lead / (Math.hypot(E.x - S.x, E.y - S.y) || 1));
     const starts = cards.map(c => ({ x: c._p.cx, y: c._p.cy, rot: c._p.rot }));
     const jit = cards.map(() => ({ s: (Math.random() - 0.5) * cW * 0.5, r: (Math.random() - 0.5) * 30 }));
@@ -1323,15 +1440,21 @@ function _sweep(cards, from, seatC, u, ms) {
 
 // Plays the animation of a move. Resolves to a cleanup() function: call it right AFTER the new state is
 // rendered, so the landed ghost is swapped for the real table card in the same frame (no flash).
+// If the local player threw/dropped the card by hand (pendingThrow), the card is already on the table; for a
+// capture their PARTNER's hand then starts from the table card, picks the thrown card up and takes both.
 async function runPlayAnimation(lm) {
   if (!lm) return null;
 
+  const pend = (pendingThrow && pendingThrow.ready && pendingThrow.cardIdx === lm.card.idx && pendingThrow.seat === lm.seat)
+    ? pendingThrow : null;
+  pendingThrow = null;
+
   const overlay = document.getElementById('anim-overlay');
   const label   = document.getElementById('anim-label');
-  overlay.innerHTML = '';
+  if (!pend) overlay.innerHTML = '';
   label.style.opacity = '0';
 
-  const seat = lm.seat;
+  const seat = lm.seat, team = seat % 2;
   const { width: cW, height: cH } = _getCardSize();
   const seatEl = document.getElementById(`seat-${seat}`);
   const handEl = document.getElementById(`hand-${seat}`);
@@ -1339,10 +1462,9 @@ async function runPlayAnimation(lm) {
   const seatC  = _centerOf(seatEl);
   const tableC = _centerOf(tcEl);
 
-  // The card leaves from its place in the hand (hidden hands: from the middle of the fan)
-  let handCardEl = handEl.querySelector(`[data-card-idx="${lm.card.idx}"]`);
+  let handCardEl = pend ? pend.handCardEl : handEl.querySelector(`[data-card-idx="${lm.card.idx}"]`);
   if (!handCardEl && handEl.children.length) handCardEl = handEl.children[Math.floor(handEl.children.length / 2)];
-  const startC = handCardEl ? _centerOf(handCardEl) : seatC;
+  const startC = pend ? { x: pend.ghost._p.cx, y: pend.ghost._p.cy } : (handCardEl ? _centerOf(handCardEl) : seatC);
 
   const tableSnap = [];
   document.querySelectorAll('#table-cards [data-card-idx]').forEach(el => {
@@ -1352,26 +1474,27 @@ async function runPlayAnimation(lm) {
       tableSnap.push({ card: cardData, el, pos: _centerOf(el), rot: tableCardPositions[idx]?.rot ?? 0 });
     }
   });
+  const capSnaps = tableSnap.filter(s => s.card?.suit);
 
   const isCapture = lm.asso || (lm.capture && lm.capture.length > 0);
   let spot = null, tcRect = null;
   if (!isCapture) {
     tcRect = tcEl.getBoundingClientRect();
-    spot = computeLandingSpot(seat, tcRect);
+    spot = pend
+      ? { x: pend.ghost._p.cx - cW / 2 - tcRect.left, y: pend.ghost._p.cy - cH / 2 - tcRect.top, rot: pend.ghost._p.rot }
+      : computeLandingSpot(seat, tcRect);
     tableCardPositions[lm.card.idx] = { ...spot, z: tableZCounter++ };
   }
   const finalRot = spot ? spot.rot : (Math.random() - 0.5) * 16;
 
-  let targetC = tableC;
-  const capSnaps = tableSnap.filter(s => s.card?.suit);
-  if (capSnaps.length > 0) {
-    targetC = {
-      x: capSnaps.reduce((a, p) => a + p.pos.x, 0) / capSnaps.length,
-      y: capSnaps.reduce((a, p) => a + p.pos.y, 0) / capSnaps.length,
-    };
-  } else if (spot && tcRect) {
-    targetC = { x: tcRect.left + spot.x + cW / 2, y: tcRect.top + spot.y + cH / 2 };
-  }
+  // The first player of a team to take something decides where that team's pile is
+  if (isCapture && pileState[team].seat === null) pileState[team].seat = seat;
+  const pileC = pileCenter(pileState[team].seat ?? seat);
+
+  const nearestTo = (p, list) => [...list].sort((a, b) => Math.hypot(a.pos.x - p.x, a.pos.y - p.y) - Math.hypot(b.pos.x - p.x, b.pos.y - p.y));
+  const centroid = capSnaps.length
+    ? { x: capSnaps.reduce((a, p) => a + p.pos.x, 0) / capSnaps.length, y: capSnaps.reduce((a, p) => a + p.pos.y, 0) / capSnaps.length }
+    : tableC;
 
   const cleanup = () => {
     overlay.innerHTML = '';
@@ -1381,65 +1504,208 @@ async function runPlayAnimation(lm) {
   };
 
   try {
-    // Swap real cards for ghosts in one frame (same size, same place → invisible)
     if (handCardEl) handCardEl.style.visibility = 'hidden';
     tableSnap.forEach(s => { s.el.style.visibility = 'hidden'; });
 
-    const captureGhosts = capSnaps.map(({ card: c, pos, rot }) => {
+    const ghostOf = new Map();
+    capSnaps.forEach(({ card: c, pos, rot }) => {
       const g = _makeGhost(c, pos.x, pos.y, rot);
       g.style.boxShadow = '1px 2px 5px rgba(0,0,0,0.35)';
       overlay.appendChild(g);
-      return g;
+      ghostOf.set(c.idx, g);
     });
-    const mainGhost = _makeGhost(lm.card, startC.x, startC.y, 0);
-    overlay.appendChild(mainGhost);
-    const hand = _makeHand(seat);
-    overlay.appendChild(hand);
-    _placeHand(hand, startC.x, startC.y);
+    const captureGhosts = capSnaps.map(s => ghostOf.get(s.card.idx));
+    const mainGhost = pend ? pend.ghost : _makeGhost(lm.card, startC.x, startC.y, 0);
+    if (!pend) overlay.appendChild(mainGhost);
 
     label.innerHTML = lm.asso  ? `<span class="anim-accent">Asso piglia tutto!</span>P${seat}`
                     : lm.scopa ? `<span class="anim-accent">SCOPA!</span>P${seat}` : '';
     label.style.opacity = (lm.asso || lm.scopa) ? '1' : '0';
 
-    // The hand takes hold of the card …
-    await _sleep(20);
-    hand.style.transition = 'opacity 120ms ease-out';
-    hand.style.opacity = '1';
-    await _sleep(130);
+    // The hand (the player's own, unless they threw the card themselves) takes hold of the card …
+    let hand = null;
+    if (!pend) {
+      hand = _makeHand(seat);
+      overlay.appendChild(hand);
+      _placeHand(hand, startC.x, startC.y);
+      await _sleep(20);
+      hand.style.transition = 'opacity 120ms ease-out';
+      hand.style.opacity = '1';
+      await _sleep(130);
+    }
 
-    // … carries it to the table …
-    await _carry(mainGhost, hand, startC, targetC, finalRot, 380 + Math.random() * 80);
-    _settle(mainGhost);
+    if (!isCapture) {
+      // … carries it to the table; if it lands on others, the hand pushes them aside
+      if (hand) {
+        await _carry(mainGhost, hand, startC, { x: tcRect.left + spot.x + cW / 2, y: tcRect.top + spot.y + cH / 2 }, finalRot, 380 + Math.random() * 80);
+      }
+      _settle(mainGhost);
+      await _pushApart(seat, lm.card.idx, mainGhost, hand);
+      if (hand) await _handAway(hand, seat);
+      // mainGhost stays: it is the new table card until cleanup() swaps in the real one
 
-    // … and then:
-    if (lm.scopa) {
-      await _handAway(hand, seat);
-      captureGhosts.forEach(g => { g.style.transition = 'none'; });
-      const u = OUT[seat];
-      await _sweep([mainGhost, ...captureGhosts], targetC, seatC, u, 820);
-
-    } else if (isCapture) {
-      // Tidy the pile under the played card, then the hand pulls everything toward the player
-      captureGhosts.forEach((g, i) => _go(g, targetC.x + (i % 2 ? 4 : -4), targetC.y + (i % 3) * 3, 160, { easing: 'ease-out' }));
-      await _sleep(220);
-      const all = [mainGhost, ...captureGhosts];
-      all.forEach((g, i) => _go(g, seatC.x, seatC.y, 460, {
-        easing: 'cubic-bezier(0.5, 0, 0.75, 0.4)', opacity: 0, delay: i * 28, fadeDelay: 300,
-        rot: g._p.rot + (Math.random() - 0.5) * 24,
-      }));
-      _goHand(hand, seatC.x, seatC.y, 460, { easing: 'cubic-bezier(0.5, 0, 0.75, 0.4)', opacity: 0, fadeDelay: 300 });
-      await _sleep(460 + all.length * 28 + 20);
+    } else if (lm.scopa) {
+      if (hand) {
+        await _carry(mainGhost, hand, startC, centroid, finalRot, 380 + Math.random() * 80);
+        _settle(mainGhost);
+        await _handAway(hand, seat);
+      }
+      await _sweep([mainGhost, ...captureGhosts], pend ? centroid : centroid, pileC, 900);
+      tidyPile(team);
 
     } else {
-      // No capture: if the card landed on others, the hand pushes them aside; then it withdraws.
-      await _pushApart(seat, lm.card.idx, mainGhost, hand);
-      await _handAway(hand, seat);
-      // mainGhost stays: it is the new table card until cleanup() swaps in the real one
+      // The played card (or, after a hand-thrown card, the table card) picks the other cards up one by one,
+      // then the hand takes them back to the pile
+      const followers = [];
+      let leader, targets;
+      if (!pend) {
+        const order = nearestTo(startC, capSnaps).map(s => ghostOf.get(s.card.idx));
+        leader = mainGhost;
+        const first = order.shift();
+        await _carry(mainGhost, hand, startC, { x: first._p.cx, y: first._p.cy }, finalRot * 0.3, 380 + Math.random() * 80);
+        first.style.boxShadow = '0 8px 18px rgba(0,0,0,0.5)';
+        followers.push(first);
+        targets = order;
+      } else {
+        const order = nearestTo(startC, capSnaps).map(s => ghostOf.get(s.card.idx));
+        leader = order.shift();                              // the card that was already on the table
+        overlay.appendChild(leader);                         // … on top
+        _settle(mainGhost);
+        hand = _makeHand((seat + 2) % 4);                    // the partner reaches in from the opposite side
+        overlay.appendChild(hand);
+        _placeHand(hand, leader._p.cx, leader._p.cy);
+        leader.style.boxShadow = '0 8px 18px rgba(0,0,0,0.5)';
+        await _sleep(20);
+        hand.style.transition = 'opacity 120ms ease-out';
+        hand.style.opacity = '1';
+        await _sleep(130);
+        targets = [mainGhost, ...order];
+      }
+      await _collect(leader, followers, hand, targets);
+      await _toPile(leader, followers, hand, pileC, team, hand._seat);
     }
   } catch (err) {
     console.error('Play animation failed:', err);
   }
   return cleanup;
+}
+
+// ── Dragging / throwing your own cards ────────────────────────────────────
+// Tap: the hand plays the card. Drag and let go: the card lands where you drop it. Flick: it flies on in
+// the direction (and with the speed) of the flick. The card then stays in the overlay until the move arrives.
+let pendingThrow = null;      // { seat, cardIdx, ghost, handCardEl, ready }
+let _suppressClick = false;
+
+function cancelThrow() {
+  if (!pendingThrow) return;
+  const p = pendingThrow;
+  pendingThrow = null;
+  if (p.ghost) p.ghost.remove();
+  if (p.handCardEl) p.handCardEl.style.visibility = '';
+}
+
+function _clampToTable(c) {
+  const r = document.getElementById('table-cards').getBoundingClientRect();
+  const { width: cW, height: cH } = _getCardSize();
+  return {
+    x: Math.max(r.left + cW / 2 + 4, Math.min(c.x, r.right - cW / 2 - 4)),
+    y: Math.max(r.top + cH / 2 + 4, Math.min(c.y, r.bottom - cH / 2 - 4)),
+  };
+}
+
+function setupOwnCardDrag() {
+  const handEl = document.getElementById('hand-0');
+  let st = null;
+
+  handEl.addEventListener('pointerdown', (e) => {
+    if (pendingThrow || (e.pointerType === 'mouse' && e.button !== 0)) return;
+    const el = e.target.closest('.card.valid');
+    if (!el || !gameState) return;
+    st = { el, id: e.pointerId, x0: e.clientX, y0: e.clientY, drag: false, pts: [], ghost: null };
+  });
+
+  handEl.addEventListener('pointermove', (e) => {
+    if (!st || e.pointerId !== st.id) return;
+    if (!st.drag) {
+      if (Math.hypot(e.clientX - st.x0, e.clientY - st.y0) < 10) return;
+      const idx = parseInt(st.el.dataset.cardIdx);
+      const card = (gameState.hands[String(gameState.my_seat)] || []).find(c => c.idx === idx);
+      if (!card) { st = null; return; }
+      st.drag = true;
+      try { handEl.setPointerCapture(e.pointerId); } catch (err) { /* synthetic or already released pointer */ }
+      const c = _centerOf(st.el);
+      st.off = { x: c.x - st.x0, y: c.y - st.y0 };
+      st.ghost = _makeGhost(card, c.x, c.y, 0);
+      document.getElementById('anim-overlay').appendChild(st.ghost);
+      st.el.style.visibility = 'hidden';
+    }
+    const now = performance.now();
+    st.pts.push({ t: now, x: e.clientX, y: e.clientY });
+    while (st.pts.length > 2 && now - st.pts[0].t > 120) st.pts.shift();
+    const a = st.pts[0], b = st.pts[st.pts.length - 1];
+    const vx = b.t > a.t ? (b.x - a.x) / (b.t - a.t) : 0;
+    _setPose(st.ghost, { cx: e.clientX + st.off.x, cy: e.clientY + st.off.y, rot: Math.max(-18, Math.min(18, vx * 14)) });
+  });
+
+  const finish = async (e, cancelled) => {
+    if (!st || e.pointerId !== st.id) return;
+    const s = st; st = null;
+    if (!s.drag) return;                                    // a tap: the card's own click handler plays it
+    _suppressClick = true; setTimeout(() => { _suppressClick = false; }, 60);
+    const { width: cW, height: cH } = _getCardSize();
+    const ghost = s.ghost;
+    const cur = { x: ghost._p.cx, y: ghost._p.cy };
+    const now = performance.now();
+    const pts = s.pts.filter(p => now - p.t < 100);
+    let vx = 0, vy = 0;
+    if (pts.length >= 2) {
+      const a = pts[0], b = pts[pts.length - 1], dt = Math.max(b.t - a.t, 1);
+      vx = (b.x - a.x) / dt; vy = (b.y - a.y) / dt;
+    }
+    const speed = Math.hypot(vx, vy);
+    const zone = document.getElementById('table-cards').getBoundingClientRect();
+    const flick = speed > 0.6;
+    const raw = flick ? { x: cur.x + vx * 280, y: cur.y + vy * 280 } : cur;
+    const back = raw.y > zone.bottom + cH * 0.5 || cancelled;   // let go over the hand (or flicked toward it): not played
+
+    pendingThrow = { seat: gameState.my_seat, cardIdx: parseInt(s.el.dataset.cardIdx), ghost, handCardEl: s.el, ready: false };
+    if (back) {
+      const home = _centerOf(s.el);
+      _go(ghost, home.x, home.y, 180, { easing: 'ease-out', rot: 0 });
+      await _sleep(190);
+      cancelThrow();
+      return;
+    }
+    const target = _clampToTable(raw);
+    const finalRot = flick ? (Math.random() - 0.5) * 40 : (Math.random() - 0.5) * 12;
+    const dist = Math.hypot(target.x - cur.x, target.y - cur.y);
+    const ms = flick ? Math.max(200, Math.min(520, 160 + dist * 0.9)) : 120;
+    const spins = flick ? Math.max(1, Math.round(speed * 1.6)) * 360 * (vx >= 0 ? 1 : -1) : 0;
+    const startRot = ghost._p.rot;
+    await new Promise(resolve => {
+      const t0 = performance.now();
+      ghost.style.transition = 'none';
+      const frame = (nowT) => {
+        const t = Math.min((nowT - t0) / ms, 1);
+        const e1 = 1 - Math.pow(1 - t, 3);                  // leaves fast, slows down
+        _setPose(ghost, {
+          cx: cur.x + (target.x - cur.x) * e1, cy: cur.y + (target.y - cur.y) * e1,
+          rot: startRot + (finalRot + spins - startRot) * e1,
+        });
+        if (t < 1) requestAnimationFrame(frame); else resolve();
+      };
+      requestAnimationFrame(frame);
+    });
+    _setPose(ghost, { cx: target.x, cy: target.y, rot: finalRot });
+    _settle(ghost);
+    pendingThrow.ready = true;
+    const mine = pendingThrow;
+    setTimeout(() => { if (pendingThrow === mine) cancelThrow(); }, 12000);   // safety net
+    const ok = await playCard(mine.cardIdx);
+    if (!ok && pendingThrow === mine) cancelThrow();
+  };
+  handEl.addEventListener('pointerup', (e) => finish(e, false));
+  handEl.addEventListener('pointercancel', (e) => finish(e, true));
 }
 
 // Mini card with the same suit icon as the real cards
@@ -1811,7 +2077,7 @@ async function closeBreakdown() {
 
 // ── Settings (text size, card size, suggestions) ──────────────────────────
 const SETTINGS_KEY = 'scopone.settings';
-const settings = { textScale: 1, cardScale: 1, hints: true };
+const settings = { textScale: 1, cardScale: 1, hints: true, pileCounts: false };
 
 function hintsOn() { return settings.hints; }
 
@@ -1820,6 +2086,7 @@ function applySettings() {
   root.style.setProperty('--text-scale', String(settings.textScale));
   root.style.setProperty('--card-scale', String(settings.cardScale));
   document.body.classList.toggle('hints-off', !settings.hints);
+  document.body.classList.toggle('pile-counts', settings.pileCounts);
   document.querySelectorAll('#settings-modal .seg').forEach(seg => {
     const cur = String(settings[seg.dataset.setting]);
     seg.querySelectorAll('button').forEach(b => b.classList.toggle('on', b.dataset.v === cur));
@@ -1832,16 +2099,33 @@ function loadSettings() {
 }
 
 // Card size changed (setting or window resize): table positions are in px, so lay them out again
+function _tableDimsNow() {
+  const r = document.getElementById('table-cards').getBoundingClientRect();
+  const { width: cW, height: cH } = _getCardSize();
+  return { W: r.width, H: r.height, cW, cH };
+}
+
+// Screen or card size changed: keep every card where it was, relative to the table (positions are permanent)
+let _tableDims = null;
 function relayoutTable() {
+  const old = _tableDims;
   _cardSizeCache = null;
-  if (!gameState) return;
-  Object.keys(tableCardPositions).forEach(k => delete tableCardPositions[k]);
-  tableZCounter = 1;
-  renderState();
+  const now = _tableDimsNow();
+  if (old && old.W > 0 && now.W > 0) {
+    const mg = 6;
+    const rx = Math.max(now.W - now.cW - 2 * mg, 1) / Math.max(old.W - old.cW - 2 * mg, 1);
+    const ry = Math.max(now.H - now.cH - 2 * mg, 1) / Math.max(old.H - old.cH - 2 * mg, 1);
+    Object.values(tableCardPositions).forEach(p => {
+      p.x = mg + (p.x - mg) * rx;
+      p.y = mg + (p.y - mg) * ry;
+    });
+  }
+  _tableDims = now;
+  if (gameState) renderState();
 }
 
 function setSetting(key, raw) {
-  settings[key] = key === 'hints' ? raw === 'true' : parseFloat(raw);
+  settings[key] = (key === 'hints' || key === 'pileCounts') ? raw === 'true' : parseFloat(raw);
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
   applySettings();
   if (key === 'hints') {
@@ -1866,6 +2150,7 @@ window.addEventListener('resize', () => {
   clearTimeout(_resizeTimer);
   _resizeTimer = setTimeout(relayoutTable, 150);
 });
+setupOwnCardDrag();
 
 loadSettings();
 

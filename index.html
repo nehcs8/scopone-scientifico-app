@@ -136,6 +136,7 @@
       <div id="table-empty">empty</div>
     </div>
     <div id="move-log"></div>
+    <div id="piles"><div class="pile" id="pile-0"><div class="pile-count"></div></div><div class="pile" id="pile-1"><div class="pile-count"></div></div></div>
 
     <div class="seat-panel" id="seat-2">
       <div class="hand-h" id="hand-2"></div>
@@ -222,6 +223,12 @@
     <div class="set-row">
       <div class="set-label">Suggestions<small>Highlight playable cards and show turn hints</small></div>
       <div class="seg" data-setting="hints">
+        <button data-v="true">On</button><button data-v="false">Off</button>
+      </div>
+    </div>
+    <div class="set-row">
+      <div class="set-label">Pile counts<small>Show how many cards each team has taken, next to its pile</small></div>
+      <div class="seg" data-setting="pileCounts">
         <button data-v="true">On</button><button data-v="false">Off</button>
       </div>
     </div>

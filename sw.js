@@ -1,6 +1,6 @@
 // Service worker for the offline web app / iOS home-screen app. The build copies this to <app root>/sw.js.
 // Everything the game needs (UI, JS engine, model weights) is precached, so it runs with no network at all.
-const CACHE_NAME = 'scopone-offline-v3';
+const CACHE_NAME = 'scopone-offline-v4';
 const ASSETS = [
   './',
   'index.html',
