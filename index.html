@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>Scopone Scientifico</title>
+<meta name="description" content="Traditional Italian card game with AI opponents and online multiplayer">
+<meta name="theme-color" content="#1a4a1a">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="application-name" content="Scopone">
+
+<!-- iOS meta tags -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Scopone">
+<link rel="apple-touch-icon" href="static/icons/icon-180.png">
+<link rel="apple-touch-icon" sizes="152x152" href="static/icons/icon-152.png">
+<link rel="apple-touch-icon" sizes="180x180" href="static/icons/icon-180.png">
+<link rel="apple-touch-icon" sizes="167x167" href="static/icons/icon-167.png">
+
+<!-- PWA manifest -->
+<link rel="manifest" href="static/manifest.json">
+
+<!-- Favicon -->
+<link rel="icon" type="image/png" sizes="32x32" href="static/icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="static/icons/icon-16.png">
+
+<!-- Stylesheets -->
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+
+<!-- ── Pregame screens ──────────────────────────────────────────────────── -->
+<div id="pregame">
+
+  <!-- Login screen -->
+  <div id="screen-login" class="pregame-screen">
+    <div class="pregame-box">
+      <h1>Scopone Scientifico</h1>
+      <p class="subtitle">Choose a username to get started</p>
+      <input id="login-username" class="pregame-input" type="text" maxlength="20"
+             placeholder="Your name" autocomplete="off">
+      <button class="pregame-btn purple" onclick="doLogin()">Enter</button>
+    </div>
+  </div>
+
+  <!-- Home screen -->
+  <div id="screen-home" class="pregame-screen">
+    <div class="pregame-box">
+      <h1>Scopone Scientifico</h1>
+      <p class="subtitle" id="home-greeting">Hello!</p>
+      <div class="pregame-divider">play vs computer</div>
+      <p class="subtitle" style="font-size:0.8rem;">You and a partner (same level) against two opponents</p>
+      <button class="pregame-btn green"  onclick="startVsAi('easy')">🐣 Pulcino <small>· Easy</small></button>
+      <button class="pregame-btn blue"   onclick="startVsAi('medium')">🦊 Volpe <small>· Medium</small></button>
+      <button class="pregame-btn purple" onclick="startVsAi('hard')">🦁 Leone <small>· Hard</small></button>
+      <div class="pregame-divider online-only">online</div>
+      <button class="pregame-btn green online-only"  onclick="doCreateLobby()">Create Game</button>
+      <button class="pregame-btn blue online-only"   onclick="quickWatchAi()">Watch AI Game</button>
+      <div class="pregame-divider online-only">or join existing</div>
+      <div class="join-row online-only">
+        <input id="join-code" class="pregame-input" type="text" maxlength="6"
+               placeholder="Room code" style="text-transform:uppercase;"
+               oninput="this.value=this.value.toUpperCase()">
+        <button class="pregame-btn green" onclick="doJoinLobby()">Join</button>
+      </div>
+      <div class="pregame-divider online-only">available lobbies</div>
+      <div id="lobby-list" class="online-only" style="max-height:200px; overflow-y:auto; margin-top:8px;">
+        <p style="color:#888; font-size:0.9rem; text-align:center;">Loading...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lobby screen -->
+  <div id="screen-lobby" class="pregame-screen">
+    <div class="pregame-box">
+      <h2>Game Lobby</h2>
+      <div class="lobby-code-bar">
+        Share code:
+        <span class="lobby-code-val" id="lobby-code-val"
+              onclick="navigator.clipboard.writeText(this.textContent)"
+              title="Click to copy">------</span>
+      </div>
+      <div style="display:flex; justify-content:center; margin:8px 0; gap:8px;" id="lobby-privacy-controls">
+        <button class="pregame-btn grey" id="btn-toggle-private" onclick="doTogglePrivate()" style="padding:6px 12px; font-size:0.85rem; display:none;">
+          <span id="privacy-icon">🔓</span> <span id="privacy-text">Public</span>
+        </button>
+        <button class="pregame-btn grey" id="btn-toggle-eval" onclick="doToggleEval()" style="padding:6px 12px; font-size:0.85rem; display:none;">
+          📊 <span id="eval-text">Evaluation: off</span>
+        </button>
+      </div>
+      <p id="lobby-eval-hint" style="display:none; color:#bbb; font-size:0.8rem; text-align:center; margin:4px 0;">
+        Evaluation mode: you at P0, your partner AI at P2, opponent AIs at P1/P3. Games are played in
+        pairs on the same deals (the second one mirrored), results are logged. Peeking is disabled.
+      </p>
+      <div id="lobby-slots"></div>
+      <p class="lobby-status" id="lobby-status">Waiting for players...</p>
+      <button class="pregame-btn purple" id="btn-start-lobby" onclick="doStartGame()">Start Game</button>
+      <button class="pregame-btn grey"   onclick="leaveLobby()">Back to Home</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── Capture choice modal ───────────────────────────────────────────── -->
+<div id="capture-modal">
+  <div id="capture-box">
+    <h3>Choose your capture</h3>
+    <div id="capture-options"></div>
+  </div>
+</div>
+
+<!-- ── Hand breakdown popup ───────────────────────────────────────────── -->
+<div id="breakdown-panel">
+  <div id="breakdown-box">
+    <h3 id="breakdown-title">Hand Result</h3>
+    <table class="breakdown-table">
+      <thead><tr><th>Category</th><th>Team 0</th><th>Team 1</th></tr></thead>
+      <tbody id="breakdown-body"></tbody>
+    </table>
+    <button class="breakdown-details-btn" onclick="toggleBreakdownDetails()">Show Details</button>
+    <div id="eval-summary" style="display:none; margin-top:12px; font-size:0.85rem; color:#ccc; line-height:1.45;"></div>
+    <button class="breakdown-close" onclick="closeBreakdown()">Next Hand →</button>
+    <button class="breakdown-close" id="btn-eval-next" onclick="evalNextGame()" style="display:none;">Next evaluation game →</button>
+    <button class="breakdown-menu-btn" onclick="backToMainMenu()" style="display:none;">Back to Main Menu</button>
+  </div>
+</div>
+
+<!-- ── Main app ───────────────────────────────────────────────────────── -->
+<div id="app">
+  <!-- Top bar -->
+  <div id="topbar">
+    <h2>Scopone</h2>
+    <div id="topbar-stats">
+      <div style="display:flex; gap:8px;">
+        <span class="score-chip score-chip-t0" id="score-t0">Team 0: 0</span>
+        <span class="score-chip score-chip-t1" id="score-t1">Team 1: 0</span>
+      </div>
+      <div id="team-stats" style="display:flex; gap:12px; justify-content:space-around;">
+        <span id="stats-t0" style="color:#6a9aaa;">T0: 0📇 0♦ 0⭐</span>
+        <span id="stats-t1" style="color:#aa6a6a;">T1: 0📇 0♦ 0⭐</span>
+      </div>
+      <span id="hand-indicator" style="color:#888; font-size:0.6rem; text-align:center;">Hand 1/4</span>
+    </div>
+    <button id="topbar-menu-btn" onclick="toggleMenu()">☰</button>
+    <span id="room-badge" style="display:none;"></span>
+  </div>
+
+  <!-- Board -->
+  <div id="board">
+    <!-- P2 top (Team 0, partner of P0) -->
+    <div class="seat-panel" id="seat-2">
+      <div class="seat-header">
+        <span class="team-badge team0">T0</span>
+        <span>P2</span>
+        <span id="taken-2" style="font-size:0.75rem; color:#aaa;"></span>
+        <button class="eye-btn" id="eye-2" onclick="toggleHand(2)">👁</button>
+      </div>
+      <div class="hand-h" id="hand-2"></div>
+      <div id="move-log"></div>
+    </div>
+
+    <!-- P1 left (Team 1) -->
+    <div class="seat-panel" id="seat-1">
+      <div class="seat-header">
+        <span class="team-badge team1">T1</span>
+        <span>P1</span>
+        <button class="eye-btn" id="eye-1" onclick="toggleHand(1)">👁</button>
+      </div>
+      <span id="taken-1" style="font-size:0.75rem; color:#aaa;"></span>
+      <div class="hand-h" id="hand-1"></div>
+    </div>
+
+    <!-- Table -->
+    <div id="table-area">
+      <div id="table-label">TABLE</div>
+      <div id="table-cards"></div>
+      <div id="table-empty">empty</div>
+    </div>
+
+    <!-- P3 right (Team 1) -->
+    <div class="seat-panel" id="seat-3">
+      <div class="seat-header">
+        <span class="team-badge team1">T1</span>
+        <span>P3</span>
+        <button class="eye-btn" id="eye-3" onclick="toggleHand(3)">👁</button>
+      </div>
+      <span id="taken-3" style="font-size:0.75rem; color:#aaa;"></span>
+      <div class="hand-h" id="hand-3"></div>
+    </div>
+
+    <!-- P0 bottom (Team 0, human by default) -->
+    <div class="seat-panel" id="seat-0">
+      <div class="seat-header">
+        <span class="team-badge team0">T0</span>
+        <span>P0</span>
+        <span id="taken-0" style="font-size:0.75rem; color:#aaa;"></span>
+        <button class="eye-btn" id="eye-0" onclick="toggleHand(0)">👁</button>
+      </div>
+      <div class="hand-h" id="hand-0"></div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div id="controls">
+    <div id="ctrl-buttons">
+      <button class="ctrl-btn" id="btn-next" onclick="nextMove()">Next Move</button>
+      <button class="ctrl-btn" id="btn-new"  onclick="showSetup()">New Game</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Menu Modal ───────────────────────────────────────────────────────── -->
+<div id="menu-modal">
+  <div id="menu-box">
+    <h3>Menu</h3>
+    <button onclick="toggleMenu()">Resume Game</button>
+    <button onclick="showSetup(); toggleMenu();">New Game</button>
+    <button onclick="backToMainMenu(); toggleMenu();">Main Menu</button>
+  </div>
+</div>
+
+<div id="anim-overlay"></div>
+<div id="anim-label"></div>
+
+<script src="static/config.js"></script>
+<script src="static/script.js"></script>
+<script>
+// Register service worker for PWA support
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register(window.SCOPONE_OFFLINE ? 'sw.js' : '/static/sw.js')
+      .then((registration) => {
+        console.log('ServiceWorker registered:', registration.scope);
+
+        // Check for updates periodically
+        setInterval(() => {
+          registration.update();
+        }, 60000); // Check every minute
+      })
+      .catch((error) => {
+        console.error('ServiceWorker registration failed:', error);
+      });
+  });
+}
+</script>
+</body>
+</html>
