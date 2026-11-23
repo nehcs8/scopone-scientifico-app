@@ -91,6 +91,7 @@ function serialize(room, ownedSeat) {
     table: st.table.map(cardDict),
     hand_sizes: handSizes,
     taken_counts: { 0: st.taken[0].length, 1: st.taken[1].length },
+    denari_counts: { 0: st.taken[0].filter((c) => cardSuit(c) === 0).length, 1: st.taken[1].filter((c) => cardSuit(c) === 0).length },
     scope: { ...st.scope },
     game_scores: { ...st.gameScores },
     valid_card_indices: validIndices,

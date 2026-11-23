@@ -903,8 +903,8 @@ function renderState() {
     _lastRendered.scores = scoresKey;
     const sc0 = document.getElementById('score-t0');
     const sc1 = document.getElementById('score-t1');
-    sc0.textContent = `Team 0: ${s0}`;
-    sc1.textContent = `Team 1: ${s1}`;
+    sc0.textContent = s0;
+    sc1.textContent = s1;
     sc0.className = 'score-chip' + (s0 > s1 ? ' winning' : '');
     sc1.className = 'score-chip' + (s1 > s0 ? ' winning' : '');
   }
@@ -919,15 +919,17 @@ function renderState() {
   // Team stats in topbar - only update if changed
   const takenCounts = gs.taken_counts || {};
   const scope = gs.scope || {};
-  const denari0 = gs.taken ? countDenari(gs.taken, 0) : '?';
-  const denari1 = gs.taken ? countDenari(gs.taken, 1) : '?';
+  const dc = gs.denari_counts || {};
+  const denari0 = dc[0] ?? (gs.taken ? countDenari(gs.taken, 0) : 0);
+  const denari1 = dc[1] ?? (gs.taken ? countDenari(gs.taken, 1) : 0);
   const statsKey = `${takenCounts[0]}-${denari0}-${scope[0]}-${takenCounts[1]}-${denari1}-${scope[1]}`;
   if (_lastRendered.stats !== statsKey) {
     _lastRendered.stats = statsKey;
-    const stats0 = document.getElementById('stats-t0');
-    const stats1 = document.getElementById('stats-t1');
-    if (stats0) stats0.textContent = `T0: ${takenCounts[0] ?? 0}📇 ${denari0}♦ ${scope[0] ?? 0}⭐`;
-    if (stats1) stats1.textContent = `T1: ${takenCounts[1] ?? 0}📇 ${denari1}♦ ${scope[1] ?? 0}⭐`;
+    [[0, denari0], [1, denari1]].forEach(([t, d]) => {
+      document.getElementById(`c-t${t}`).textContent = takenCounts[t] ?? 0;
+      document.getElementById(`d-t${t}`).textContent = d;
+      document.getElementById(`sc-t${t}`).textContent = scope[t] ?? 0;
+    });
 
     // Also update individual taken displays (for desktop)
     [0,1,2,3].forEach(s => {
@@ -954,12 +956,14 @@ function renderState() {
     const isWatchMode = gs.human_seats.length === 0;
     [0,1,2,3].forEach(s => {
       const btn = document.getElementById(`eye-${s}`);
-      const canToggle = isWatchMode || gs.my_seat === s;
+      const canToggle = isWatchMode;
       btn.style.display = canToggle ? '' : 'none';
       btn.classList.toggle('on', visible.has(s));
       btn.textContent = visible.has(s) ? '👁' : '🙈';
     });
   }
+
+  document.getElementById('seat-0').classList.toggle('my-turn', canPlayCurrentSeat(gs));
 
   // Hands - only re-render if hands changed
   const validSet = canPlayCurrentSeat(gs) ? new Set(gs.valid_card_indices) : new Set();
@@ -1072,8 +1076,8 @@ function computeLandingSpot(seat, rect) {
 
 // ── Animation system ───────────────────────────────────────────────────────
 // Every moving card is a "ghost": a real card element of exactly the same size as all other cards
-// (CSS var --cw). Ghosts are only moved with transform (GPU-composited) and never resized, so a card
-// keeps one size from the hand, through the throw, to the table.
+// (CSS var --cw), moved only with transform (GPU-composited), never resized. A drawn hand carries the
+// card, gathers captured cards, pushes overlapping cards apart; a small broom sweeps the table on a scopa.
 
 const _sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -1102,7 +1106,7 @@ function _tablePose(pos) {
   return `translate(${pos.x}px, ${pos.y}px) rotate(${pos.rot}deg)`;
 }
 
-// Ghost pose: centre (viewport px) + rotation. The only thing that ever changes on a ghost.
+// Pose of any ghost (card, hand, broom): centre in viewport px + rotation
 function _setPose(el, p) {
   el._p = p;
   el.style.transform = `translate3d(${p.cx - el._w / 2}px, ${p.cy - el._h / 2}px, 0) rotate(${p.rot}deg)`;
@@ -1117,53 +1121,111 @@ function _makeGhost(card, cx, cy, rot = 0) {
   return el;
 }
 
-// Glide a ghost to a new centre (and optionally rotation / opacity) with a CSS transition
-function _go(el, cx, cy, ms, { opacity, easing = 'ease-in-out', rot } = {}) {
-  el.style.transition = `transform ${ms}ms ${easing}` + (opacity !== undefined ? `, opacity ${ms}ms ${easing}` : '');
-  if (opacity !== undefined) el.style.opacity = String(opacity);
+// Glide a ghost with a CSS transition. fadeDelay: start fading to `opacity` only after that many ms.
+function _go(el, cx, cy, ms, { opacity, easing = 'ease-in-out', rot, delay = 0, fadeDelay = 0 } = {}) {
+  let t = `transform ${ms}ms ${easing} ${delay}ms`;
+  if (opacity !== undefined) {
+    t += `, opacity ${Math.max(ms - fadeDelay, 1)}ms ${easing} ${delay + fadeDelay}ms`;
+    el.style.opacity = String(opacity);
+  }
+  el.style.transition = t;
   _setPose(el, { cx, cy, rot: rot !== undefined ? rot : el._p.rot });
 }
 
-// Throw along a quadratic Bézier arc with some spin; lands exactly on (toX, toY) with rotation finalRot.
-function _throwArc(ghost, fromX, fromY, toX, toY, finalRot, durationMs) {
+// ── The hand ─────────────────────────────────────────────────────────────
+const OUT = { 0: [0, 1], 1: [-1, 0], 2: [0, -1], 3: [1, 0] };          // direction from the table toward each seat
+const HAND_ANGLE = { 0: 0, 1: 90, 2: 180, 3: -90 };
+const HAND_SVG = `<svg viewBox="0 0 60 86" xmlns="http://www.w3.org/2000/svg" fill="#f3cda4" stroke="#b07f55" stroke-width="1.6" stroke-linejoin="round">
+  <rect x="9"  y="14" width="10" height="38" rx="5"/>
+  <rect x="20" y="5"  width="10" height="44" rx="5"/>
+  <rect x="31" y="9"  width="10" height="42" rx="5"/>
+  <rect x="42" y="18" width="9"  height="34" rx="4.5"/>
+  <path d="M9 46 H51 V66 Q51 82 33 84 H27 Q9 82 9 66 Z"/>
+  <path d="M10 56 Q-2 46 4 36 Q8 32 12 40 L16 50 Z"/>
+</svg>`;
+const BROOM_SVG = `<svg viewBox="0 0 40 90" xmlns="http://www.w3.org/2000/svg" stroke-linejoin="round">
+  <rect x="17" y="0" width="6" height="52" rx="3" fill="#8a5a2b" stroke="#5c3a18" stroke-width="1.2"/>
+  <path d="M10 50 H30 L38 88 H2 Z" fill="#e2b84a" stroke="#9c7a1e" stroke-width="1.4"/>
+  <path d="M10 56 L8 86 M16 56 L15 86 M22 56 L22 86 M28 56 L29 86 M34 60 L35 86" stroke="#9c7a1e" stroke-width="1" fill="none"/>
+  <rect x="9" y="48" width="22" height="6" rx="2" fill="#b3402f" stroke="#7a2a1e" stroke-width="1"/>
+</svg>`;
+
+function _makeHand(seat) {
+  const { width } = _getCardSize();
+  const el = document.createElement('div');
+  el.className = 'ghost-hand';
+  el.innerHTML = HAND_SVG;
+  el._w = width * 0.95; el._h = width * 1.36;
+  el.style.width = el._w + 'px'; el.style.height = el._h + 'px';
+  el._seat = seat;
+  return el;
+}
+
+// Where the hand sits relative to the card it holds (fingertips on the card's middle, wrist toward the seat)
+function _handOffset(seat, hand) {
+  const { height: cH } = _getCardSize();
+  const d = hand._h / 2 - cH * 0.12;
+  return { x: OUT[seat][0] * d, y: OUT[seat][1] * d };
+}
+
+function _placeHand(hand, cx, cy) {
+  const o = _handOffset(hand._seat, hand);
+  _setPose(hand, { cx: cx + o.x, cy: cy + o.y, rot: HAND_ANGLE[hand._seat] });
+}
+
+function _goHand(hand, cx, cy, ms, opts = {}) {
+  const o = _handOffset(hand._seat, hand);
+  _go(hand, cx + o.x, cy + o.y, ms, { ...opts, rot: HAND_ANGLE[hand._seat] });
+}
+
+const _ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;   // easeInOutCubic
+
+// The hand carries the card along a gentle curve; the card turns to its landing tilt on the way
+function _carry(card, hand, from, to, finalRot, durationMs) {
   return new Promise(resolve => {
     const start = performance.now();
-    const dist = Math.hypot(toX - fromX, toY - fromY);
-    const arcH = Math.max(40, dist * 0.35);
-    const cpX = (fromX + toX) / 2;
-    const cpY = (fromY + toY) / 2 - arcH;
-    const dir = Math.random() < 0.5 ? 1 : -1;
-    const totalRot = finalRot + (1 + Math.floor(Math.random() * 2)) * 360 * dir;   // 1-2 full turns
-    ghost.style.transition = 'none';
-
+    const dx = to.x - from.x, dy = to.y - from.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const bulge = dist * 0.09 * (Math.random() < 0.5 ? 1 : -1);
+    const px = -dy / dist, py = dx / dist;
+    card.style.transition = 'none'; hand.style.transition = 'none';
     function frame(now) {
       const t = Math.min((now - start) / durationMs, 1);
-      const e = 1 - (1 - t) * (1 - t);                       // ease-out: fast leaving the hand, soft landing
-      const x = (1 - e) * (1 - e) * fromX + 2 * (1 - e) * e * cpX + e * e * toX;
-      const y = (1 - e) * (1 - e) * fromY + 2 * (1 - e) * e * cpY + e * e * toY;
-      _setPose(ghost, { cx: x, cy: y, rot: totalRot * e });
-      if (t < 1) requestAnimationFrame(frame);
-      else {
-        _setPose(ghost, { cx: toX, cy: toY, rot: finalRot });   // same look as totalRot, so no visible jump
-        resolve();
-      }
+      const e = _ease(t);
+      const b = Math.sin(Math.PI * e) * bulge;
+      const cx = from.x + dx * e + px * b, cy = from.y + dy * e + py * b;
+      _setPose(card, { cx, cy, rot: finalRot * e });
+      _placeHand(hand, cx, cy);
+      if (t < 1) requestAnimationFrame(frame); else resolve();
     }
     requestAnimationFrame(frame);
   });
 }
 
-// After a card lands on the table, check if it overlaps an existing card. If so, slide a hand in
-// from the player's side and nudge the cards apart (real cards and the landed ghost move together).
-async function _animateSeparation(seat, newCardIdx, overlay, ghost) {
+// Card touches down: its shadow shrinks (no size change)
+function _settle(card) {
+  card.style.transition = 'box-shadow 180ms ease-out';
+  card.style.boxShadow = '1px 2px 5px rgba(0,0,0,0.35)';
+}
+
+// The hand lets go and withdraws toward its seat
+async function _handAway(hand, seat) {
+  const { width: cW } = _getCardSize();
+  const p = hand._p;
+  _go(hand, p.cx + OUT[seat][0] * cW * 1.1, p.cy + OUT[seat][1] * cW * 1.1, 260, { opacity: 0, easing: 'ease-in', fadeDelay: 60 });
+  await _sleep(270);
+}
+
+// New card landed on top of others: the hand pushes the overlapped cards aside
+async function _pushApart(seat, newCardIdx, ghost, hand) {
   const newPos = tableCardPositions[newCardIdx];
   if (!newPos) return;
-
   const tableCardsEl = document.getElementById('table-cards');
   const tcRect = tableCardsEl.getBoundingClientRect();
   const { width: cW, height: cH } = _getCardSize();
-  const mg = 6;
-
+  const mg = 4;
   const nc = { x: newPos.x + cW / 2, y: newPos.y + cH / 2 };
+
   const overlaps = [];
   for (const [idxStr, pos] of Object.entries(tableCardPositions)) {
     const idx = parseInt(idxStr);
@@ -1173,66 +1235,90 @@ async function _animateSeparation(seat, newCardIdx, overlay, ghost) {
   }
   if (overlaps.length === 0) return;
 
-  const pileVX = tcRect.left + nc.x;
-  const pileVY = tcRect.top  + nc.y;
-  const handRot = { 0: 0, 2: 180, 1: 90, 3: -90 };
-  const away = cW * 1.2;
-  let hStartX, hStartY;
-  switch (seat) {
-    case 2: hStartX = pileVX; hStartY = tcRect.top - away; break;
-    case 1: hStartX = tcRect.left - away; hStartY = pileVY; break;
-    case 3: hStartX = tcRect.right + away; hStartY = pileVY; break;
-    default: hStartX = pileVX; hStartY = tcRect.bottom + away;
-  }
+  const clampX = x => Math.max(mg, Math.min(x, tcRect.width - cW - mg));
+  const clampY = y => Math.max(mg, Math.min(y, tcRect.height - cH - mg));
+  const NUDGE = cW * 0.8, T = 320, ease = 'cubic-bezier(0.22, 0.7, 0.3, 1)';
+  let sx = 0, sy = 0;
 
-  const handEl = document.createElement('div');
-  handEl.textContent = '🤚';
-  const rot = handRot[seat] ?? 0;
-  const handAt = (x, y) => `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) rotate(${rot}deg)`;
-  Object.assign(handEl.style, {
-    position: 'fixed', left: '0', top: '0', fontSize: Math.round(cW * 0.6) + 'px', zIndex: '102', willChange: 'transform',
-    pointerEvents: 'none', opacity: '0', transition: 'none', transform: handAt(hStartX, hStartY),
-  });
-  overlay.appendChild(handEl);
-
-  // Slide hand in to the pile
-  await _sleep(20);
-  handEl.style.transition = 'transform 180ms ease-out, opacity 130ms ease';
-  handEl.style.opacity = '1';
-  handEl.style.transform = handAt(pileVX, pileVY);
-  await _sleep(200);
-
-  // Nudge overlapping cards away from the new card; push the new card back slightly
-  const NUDGE = cW * 0.7;
-  let sumDx = 0, sumDy = 0;
   overlaps.forEach(({ idx, pos, center }) => {
     let dx = center.x - nc.x, dy = center.y - nc.y;
-    const d = Math.hypot(dx, dy) || 1;
-    dx /= d; dy /= d;
-    sumDx += dx; sumDy += dy;
-    const nx = Math.max(mg, Math.min(pos.x + dx * NUDGE, tcRect.width  - cW - mg));
-    const ny = Math.max(mg, Math.min(pos.y + dy * NUDGE, tcRect.height - cH - mg));
-    tableCardPositions[idx] = { ...tableCardPositions[idx], x: nx, y: ny };
+    const d = Math.hypot(dx, dy);
+    if (d < 1) { dx = OUT[seat][0] * -1 || 1; dy = OUT[seat][1] * -1; }   // dead centre: push away from the player
+    const n = Math.hypot(dx, dy) || 1;
+    dx /= n; dy /= n; sx += dx; sy += dy;
+    tableCardPositions[idx] = {
+      ...pos, x: clampX(pos.x + dx * NUDGE), y: clampY(pos.y + dy * NUDGE),
+      rot: pos.rot + (Math.random() - 0.5) * 14,
+    };
     const el = tableCardsEl.querySelector(`[data-card-idx="${idx}"]`);
     if (el) {
-      el.style.transition = 'transform 180ms ease-out';
+      el.style.transition = `transform ${T}ms ${ease}`;
       el.style.transform = _tablePose(tableCardPositions[idx]);
     }
   });
 
-  const sd = Math.hypot(sumDx, sumDy) || 1;
-  const backX = Math.max(mg, Math.min(newPos.x - (sumDx / sd) * NUDGE * 0.45, tcRect.width  - cW - mg));
-  const backY = Math.max(mg, Math.min(newPos.y - (sumDy / sd) * NUDGE * 0.45, tcRect.height - cH - mg));
-  tableCardPositions[newCardIdx] = { ...tableCardPositions[newCardIdx], x: backX, y: backY };
-  if (ghost) _go(ghost, tcRect.left + backX + cW / 2, tcRect.top + backY + cH / 2, 180, { easing: 'ease-out' });
-  await _sleep(200);
+  // The hand drags the new card a little along with the push
+  const sn = Math.hypot(sx, sy) || 1;
+  const nx = clampX(newPos.x + (sx / sn) * NUDGE * 0.35), ny = clampY(newPos.y + (sy / sn) * NUDGE * 0.35);
+  tableCardPositions[newCardIdx] = { ...newPos, x: nx, y: ny };
+  const gc = { x: tcRect.left + nx + cW / 2, y: tcRect.top + ny + cH / 2 };
+  _go(ghost, gc.x, gc.y, T, { easing: ease });
+  _goHand(hand, gc.x, gc.y, T, { easing: ease });
+  await _sleep(T + 30);
+}
 
-  // Hand slides back out
-  handEl.style.transition = 'transform 160ms ease-in, opacity 130ms ease 30ms';
-  handEl.style.opacity = '0';
-  handEl.style.transform = handAt(hStartX, hStartY);
-  await _sleep(180);
-  handEl.remove();
+// Scopa: a small broom sweeps the pile toward the player in one flowing stroke
+function _sweep(cards, from, seatC, u, ms) {
+  return new Promise(resolve => {
+    const { width: cW } = _getCardSize();
+    const broom = document.createElement('div');
+    broom.className = 'ghost-broom';
+    broom.innerHTML = BROOM_SVG;
+    broom._w = cW * 0.8; broom._h = cW * 1.75;
+    broom.style.width = broom._w + 'px'; broom.style.height = broom._h + 'px';
+    document.getElementById('anim-overlay').appendChild(broom);
+
+    const lead = cW * 1.2;                                   // broom starts behind the pile
+    const S = { x: from.x - u[0] * lead, y: from.y - u[1] * lead };
+    const E = { x: seatC.x, y: seatC.y };
+    const px = -u[1], py = u[0];                             // sideways
+    const baseAngle = Math.atan2(-u[0], u[1]) * 180 / Math.PI;   // bristles lead toward the player
+    const f0 = Math.min(0.35, lead / (Math.hypot(E.x - S.x, E.y - S.y) || 1));
+    const starts = cards.map(c => ({ x: c._p.cx, y: c._p.cy, rot: c._p.rot }));
+    const jit = cards.map(() => ({ s: (Math.random() - 0.5) * cW * 0.5, r: (Math.random() - 0.5) * 30 }));
+    const path = e => {
+      const wob = Math.sin(e * Math.PI * 3) * cW * 0.45 * (1 - 0.5 * e);
+      return { x: S.x + (E.x - S.x) * e + px * wob, y: S.y + (E.y - S.y) * e + py * wob };
+    };
+    const b0 = path(f0);
+    const start = performance.now();
+    cards.forEach(c => { c.style.transition = 'none'; });
+    broom.style.opacity = '0'; broom.style.transition = 'none';
+
+    function frame(now) {
+      const t = Math.min((now - start) / ms, 1);
+      const e = _ease(t);
+      const B = path(e);
+      _setPose(broom, { cx: B.x, cy: B.y, rot: baseAngle + Math.sin(e * Math.PI * 3 + 1.2) * 14 });
+      broom.style.opacity = String(Math.min(1, t * 8, (1 - t) * 6));
+      cards.forEach((c, i) => {
+        const ei = Math.max(0, e - i * 0.018);               // later cards trail a little
+        if (ei <= f0) return;
+        const Bi = path(ei);
+        const k = Math.min(1, (ei - f0) / 0.25);              // pile bunches up as it is pushed
+        const s = starts[i];
+        _setPose(c, {
+          cx: s.x + (Bi.x - b0.x) + jit[i].s * k * px + (starts[0].x - s.x) * 0.3 * k,
+          cy: s.y + (Bi.y - b0.y) + jit[i].s * k * py + (starts[0].y - s.y) * 0.3 * k,
+          rot: s.rot + jit[i].r * k,
+        });
+        c.style.opacity = String(Math.max(0, 1 - (e - 0.82) / 0.18));
+      });
+      if (t < 1) requestAnimationFrame(frame);
+      else { broom.remove(); resolve(); }
+    }
+    requestAnimationFrame(frame);
+  });
 }
 
 // Plays the animation of a move. Resolves to a cleanup() function: call it right AFTER the new state is
@@ -1245,12 +1331,13 @@ async function runPlayAnimation(lm) {
   overlay.innerHTML = '';
   label.style.opacity = '0';
 
+  const seat = lm.seat;
   const { width: cW, height: cH } = _getCardSize();
-  const seatEl      = document.getElementById(`seat-${lm.seat}`);
-  const tableAreaEl = document.getElementById('table-area');
-  const handEl      = document.getElementById(`hand-${lm.seat}`);
+  const seatEl = document.getElementById(`seat-${seat}`);
+  const handEl = document.getElementById(`hand-${seat}`);
+  const tcEl   = document.getElementById('table-cards');
   const seatC  = _centerOf(seatEl);
-  const tableC = _centerOf(tableAreaEl);
+  const tableC = _centerOf(tcEl);
 
   // The card leaves from its place in the hand (hidden hands: from the middle of the fan)
   let handCardEl = handEl.querySelector(`[data-card-idx="${lm.card.idx}"]`);
@@ -1258,37 +1345,29 @@ async function runPlayAnimation(lm) {
   const startC = handCardEl ? _centerOf(handCardEl) : seatC;
 
   const tableSnap = [];
-  document.querySelectorAll('#table-cards [data-card-idx]').forEach(tcEl => {
-    const idx = parseInt(tcEl.dataset.cardIdx);
+  document.querySelectorAll('#table-cards [data-card-idx]').forEach(el => {
+    const idx = parseInt(el.dataset.cardIdx);
     const cardData = (lm.capture || []).find(c => c.idx === idx);
     if (lm.asso || cardData) {
-      tableSnap.push({ card: cardData, el: tcEl, pos: _centerOf(tcEl), rot: tableCardPositions[idx]?.rot ?? 0 });
+      tableSnap.push({ card: cardData, el, pos: _centerOf(el), rot: tableCardPositions[idx]?.rot ?? 0 });
     }
   });
 
-  // Landing spot for plays that stay on the table
   const isCapture = lm.asso || (lm.capture && lm.capture.length > 0);
   let spot = null, tcRect = null;
   if (!isCapture) {
-    tcRect = document.getElementById('table-cards').getBoundingClientRect();
-    spot = computeLandingSpot(lm.seat, tcRect);
+    tcRect = tcEl.getBoundingClientRect();
+    spot = computeLandingSpot(seat, tcRect);
     tableCardPositions[lm.card.idx] = { ...spot, z: tableZCounter++ };
   }
-  const throwFinalRot = spot ? spot.rot : (Math.random() - 0.5) * 20;
+  const finalRot = spot ? spot.rot : (Math.random() - 0.5) * 16;
 
   let targetC = tableC;
-  if (lm.asso && tableSnap.length > 0) {
-    const nearest = tableSnap
-      .filter(s => s.card?.suit)
-      .reduce((best, s) => {
-        const d = Math.hypot(s.pos.x - startC.x, s.pos.y - startC.y);
-        return (!best || d < best.d) ? { s, d } : best;
-      }, null);
-    if (nearest) targetC = nearest.s.pos;
-  } else if (!lm.asso && tableSnap.length > 0) {
+  const capSnaps = tableSnap.filter(s => s.card?.suit);
+  if (capSnaps.length > 0) {
     targetC = {
-      x: tableSnap.reduce((s, p) => s + p.pos.x, 0) / tableSnap.length,
-      y: tableSnap.reduce((s, p) => s + p.pos.y, 0) / tableSnap.length,
+      x: capSnaps.reduce((a, p) => a + p.pos.x, 0) / capSnaps.length,
+      y: capSnaps.reduce((a, p) => a + p.pos.y, 0) / capSnaps.length,
     };
   } else if (spot && tcRect) {
     targetC = { x: tcRect.left + spot.x + cW / 2, y: tcRect.top + spot.y + cH / 2 };
@@ -1302,118 +1381,60 @@ async function runPlayAnimation(lm) {
   };
 
   try {
-    // Swap the real cards for ghosts in one frame (same size, same place → invisible)
+    // Swap real cards for ghosts in one frame (same size, same place → invisible)
     if (handCardEl) handCardEl.style.visibility = 'hidden';
     tableSnap.forEach(s => { s.el.style.visibility = 'hidden'; });
 
+    const captureGhosts = capSnaps.map(({ card: c, pos, rot }) => {
+      const g = _makeGhost(c, pos.x, pos.y, rot);
+      g.style.boxShadow = '1px 2px 5px rgba(0,0,0,0.35)';
+      overlay.appendChild(g);
+      return g;
+    });
     const mainGhost = _makeGhost(lm.card, startC.x, startC.y, 0);
     overlay.appendChild(mainGhost);
-    const captureGhosts = tableSnap
-      .filter(s => s.card?.suit)
-      .map(({ card: c, pos, rot }) => {
-        const g = _makeGhost(c, pos.x, pos.y, rot);
-        overlay.appendChild(g);
-        return g;
-      });
+    const hand = _makeHand(seat);
+    overlay.appendChild(hand);
+    _placeHand(hand, startC.x, startC.y);
 
-    // For asso: pair each ghost with its snap, sorted nearest → farthest from the thrower
-    const assoItems = lm.asso
-      ? tableSnap
-          .filter(s => s.card?.suit)
-          .map((snap, i) => ({ snap, ghost: captureGhosts[i] }))
-          .sort((a, b) =>
-            Math.hypot(a.snap.pos.x - startC.x, a.snap.pos.y - startC.y) -
-            Math.hypot(b.snap.pos.x - startC.x, b.snap.pos.y - startC.y))
-      : [];
+    label.innerHTML = lm.asso  ? `<span class="anim-accent">Asso piglia tutto!</span>P${seat}`
+                    : lm.scopa ? `<span class="anim-accent">SCOPA!</span>P${seat}` : '';
+    label.style.opacity = (lm.asso || lm.scopa) ? '1' : '0';
 
-    label.innerHTML = lm.asso  ? `<span class="anim-accent">Asso piglia tutto!</span>P${lm.seat}`
-                    : lm.scopa ? `<span class="anim-accent">SCOPA!</span>P${lm.seat}`
-                    :             `P${lm.seat}`;
-    label.style.opacity = '1';
+    // The hand takes hold of the card …
+    await _sleep(20);
+    hand.style.transition = 'opacity 120ms ease-out';
+    hand.style.opacity = '1';
+    await _sleep(130);
 
-    // ── Throw ───────────────────────────────────────────────────────────
-    await _throwArc(mainGhost, startC.x, startC.y, targetC.x, targetC.y, throwFinalRot, 340 + Math.random() * 100);
+    // … carries it to the table …
+    await _carry(mainGhost, hand, startC, targetC, finalRot, 380 + Math.random() * 80);
+    _settle(mainGhost);
 
-    // ── Action ──────────────────────────────────────────────────────────
-    if (lm.asso) {
-      if (assoItems.length === 0) {
-        _go(mainGhost, seatC.x, seatC.y, 300, { opacity: 0, easing: 'ease-in' });
-        await _sleep(320);
-      } else {
-        assoItems[0].ghost.style.transition = 'opacity 100ms ease';
-        assoItems[0].ghost.style.opacity = '0';
-        await _sleep(90);
-        for (let i = 1; i < assoItems.length; i++) {
-          const dest = assoItems[i].snap.pos;
-          _go(mainGhost, dest.x, dest.y, 170, { easing: 'ease-in-out' });
-          await _sleep(180);
-          assoItems[i].ghost.style.transition = 'opacity 90ms ease';
-          assoItems[i].ghost.style.opacity = '0';
-          await _sleep(60);
-        }
-        await _sleep(60);
-        [mainGhost, ...captureGhosts].forEach(g =>
-          _go(g, seatC.x, seatC.y, 360, { opacity: 0, easing: 'ease-in' }));
-        await _sleep(380);
-      }
+    // … and then:
+    if (lm.scopa) {
+      await _handAway(hand, seat);
+      captureGhosts.forEach(g => { g.style.transition = 'none'; });
+      const u = OUT[seat];
+      await _sweep([mainGhost, ...captureGhosts], targetC, seatC, u, 820);
 
-    } else if (lm.scopa) {
-      const dx = seatC.x - targetC.x, dy = seatC.y - targetC.y;
-      const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-      const ux = dx / dist, uy = dy / dist;
-      const broomAngle = Math.atan2(uy, ux) * 180 / Math.PI - 45;
-
-      captureGhosts.forEach(g => _go(g, targetC.x, targetC.y, 140, { easing: 'ease-in' }));
-      await _sleep(160);
-
-      const bx0 = targetC.x - ux * cW, by0 = targetC.y - uy * cW;
-      const broom = Object.assign(document.createElement('div'), { textContent: '🧹' });
-      const broomAt = (x, y) => `translate3d(${x}px, ${y}px, 0) translate(-50%, -50%) rotate(${broomAngle}deg)`;
-      Object.assign(broom.style, {
-        position: 'fixed', left: '0', top: '0', fontSize: Math.round(cW * 1.8) + 'px', zIndex: '101', willChange: 'transform',
-        pointerEvents: 'none', opacity: '0', transition: 'none', transform: broomAt(bx0, by0),
-      });
-      overlay.appendChild(broom);
-      await _sleep(20);
-      broom.style.transition = 'opacity 80ms ease';
-      broom.style.opacity = '1';
-      await _sleep(90);
-
-      const sweepPx = cW * 0.7;
-      const allGhosts = [mainGhost, ...captureGhosts];
-      for (let i = 0; i < 3; i++) {
-        const cx = targetC.x + ux * sweepPx * (i + 1);
-        const cy = targetC.y + uy * sweepPx * (i + 1);
-        const brx = bx0 + ux * sweepPx * (i + 1);
-        const bry = by0 + uy * sweepPx * (i + 1);
-        broom.style.transition = 'transform 133ms ease-in-out';
-        broom.style.transform = broomAt(brx, bry);
-        allGhosts.forEach(g => _go(g, cx, cy, 133, { easing: 'ease-in-out' }));
-        await _sleep(150);
-        if (i < 2) {
-          broom.style.transition = 'transform 73ms ease-out';
-          broom.style.transform = broomAt(brx - ux * 14, bry - uy * 14);
-          await _sleep(95);
-        }
-      }
-
-      allGhosts.forEach(g => _go(g, seatC.x, seatC.y, 227, { opacity: 0, easing: 'ease-in' }));
-      broom.style.transition = 'transform 227ms ease-in, opacity 147ms ease 80ms';
-      broom.style.transform = broomAt(seatC.x + ux * 40, seatC.y + uy * 40);
-      broom.style.opacity = '0';
-      await _sleep(240);
-
-    } else if (captureGhosts.length > 0) {
-      captureGhosts.forEach(g => _go(g, targetC.x, targetC.y, 220, { easing: 'ease-in' }));
-      await _sleep(240);
-      [mainGhost, ...captureGhosts].forEach(g =>
-        _go(g, seatC.x, seatC.y, 340, { opacity: 0, easing: 'ease-out' }));
-      await _sleep(360);
+    } else if (isCapture) {
+      // Tidy the pile under the played card, then the hand pulls everything toward the player
+      captureGhosts.forEach((g, i) => _go(g, targetC.x + (i % 2 ? 4 : -4), targetC.y + (i % 3) * 3, 160, { easing: 'ease-out' }));
+      await _sleep(220);
+      const all = [mainGhost, ...captureGhosts];
+      all.forEach((g, i) => _go(g, seatC.x, seatC.y, 460, {
+        easing: 'cubic-bezier(0.5, 0, 0.75, 0.4)', opacity: 0, delay: i * 28, fadeDelay: 300,
+        rot: g._p.rot + (Math.random() - 0.5) * 24,
+      }));
+      _goHand(hand, seatC.x, seatC.y, 460, { easing: 'cubic-bezier(0.5, 0, 0.75, 0.4)', opacity: 0, fadeDelay: 300 });
+      await _sleep(460 + all.length * 28 + 20);
 
     } else {
-      // No capture: the ghost stays put (it is the new table card) while any overlap is separated.
-      // It is removed by cleanup() once the real table card is rendered.
-      await _animateSeparation(lm.seat, lm.card.idx, overlay, mainGhost);
+      // No capture: if the card landed on others, the hand pushes them aside; then it withdraws.
+      await _pushApart(seat, lm.card.idx, mainGhost, hand);
+      await _handAway(hand, seat);
+      // mainGhost stays: it is the new table card until cleanup() swaps in the real one
     }
   } catch (err) {
     console.error('Play animation failed:', err);
@@ -1421,68 +1442,42 @@ async function runPlayAnimation(lm) {
   return cleanup;
 }
 
+// Mini card with the same suit icon as the real cards
+function miniCard(c) {
+  return `<span class="mini ${c.color}">${VALUE_LABELS[c.value] || c.value}<span class="sicon">${SUIT_SVGS[c.suit] || ''}</span></span>`;
+}
+
+// Slim ticker with the last two moves: who, the card played, and what it took
 function updateLog(gs) {
   const lm = gs.last_move;
-
-  // Build a move entry if there's a new last_move
   if (lm) {
     const fp = `${lm.seat}-${lm.card.idx}`;
     if (fp !== lastLoggedMove) {
       lastLoggedMove = fp;
-      const card = `<span class="hl">${VALUE_LABELS[lm.card.value]}${lm.card.symbol}</span>`;
-      let msg = `P${lm.seat} → ${card}`;
-      if (lm.asso) {
-        msg += ' <span class="hl">asso piglia tutto</span>';
-      } else if (lm.capture.length > 0) {
-        const caps = lm.capture.map(c => `${c.value}${c.symbol}`).join(' ');
-        msg += ` captures ${caps}`;
-        if (lm.scopa) msg += ' <span class="sc">SCOPA</span>';
-      } else {
-        msg += ' to table';
-      }
-      moveLog.push(msg);
-      if (moveLog.length > 3) moveLog.shift();
+      let what;
+      if (lm.asso) what = '<span class="arrow">▸</span><span class="star">all</span>';
+      else if (lm.capture.length > 0) {
+        what = '<span class="arrow">▸</span>' + lm.capture.map(miniCard).join('') + (lm.scopa ? '<span class="star">★</span>' : '');
+      } else what = '<span class="arrow">↓</span>';
+      moveLog.push(`<span class="chip"><span class="who t${lm.seat % 2}">P${lm.seat}</span>${miniCard(lm.card)}${what}</span>`);
+      if (moveLog.length > 2) moveLog.shift();
     }
   }
-
-  // Always append a prompt as the last visual line (not stored in log)
-  let prompt = '';
-  if (gs.phase === 'game_over') {
-    const s0 = gs.game_scores['0'], s1 = gs.game_scores['1'];
-    const winner = s0 > s1 ? 'Team 0' : s1 > s0 ? 'Team 1' : 'Tie';
-    prompt = `<span class="sys hl">Game over — ${winner} wins (${s0}–${s1})</span>`;
-  } else if (gs.phase === 'hand_over') {
-    prompt = `<span class="sys">Hand over — see results</span>`;
-  } else {
-    const cur = gs.current_player;
-    if (canPlayCurrentSeat(gs)) {
-      prompt = hintsOn() ? `<span class="sys hl">Your turn (P${cur}) — tap a card</span>` : `<span class="sys hl">Your turn</span>`;
-    } else if (gs.human_seats.includes(cur)) {
-      prompt = `<span class="sys">P${cur} to play...</span>`;
-    } else {
-      prompt = `<span class="sys">P${cur} (AI) thinking...</span>`;
-    }
-  }
-
-  // Only update DOM if log has changed
-  const logKey = moveLog.join('|') + '||' + prompt;
+  const logKey = moveLog.join('|');
   if (_lastRendered.moveLog !== logKey) {
     _lastRendered.moveLog = logKey;
-
-    const logEl = document.getElementById('move-log');
-    logEl.innerHTML = '';
-    moveLog.forEach(html => {
-      const d = document.createElement('div');
-      d.className = 'log-line';
-      d.innerHTML = html;
-      logEl.appendChild(d);
-    });
-    const pd = document.createElement('div');
-    pd.className = 'log-line';
-    pd.innerHTML = prompt;
-    logEl.appendChild(pd);
+    document.getElementById('move-log').innerHTML = moveLog.join('');
   }
 }
+
+function toggleInfo(e) {
+  if (e) e.stopPropagation();
+  document.getElementById('info-panel').classList.toggle('open');
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#info-panel')) document.getElementById('info-panel').classList.remove('open');
+});
+document.querySelector('.info-table th.sicon').innerHTML = SUIT_SVGS.denari;
 
 function updateButtonState() {
   const btn = document.getElementById('btn-next');

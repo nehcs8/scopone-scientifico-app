@@ -129,81 +129,61 @@
 
 <!-- ── Main app ───────────────────────────────────────────────────────── -->
 <div id="app">
-  <!-- Top bar -->
-  <div id="topbar">
-    <button id="topbar-menu-btn" onclick="toggleMenu()" aria-label="Menu">☰</button>
-    <div id="topbar-stats">
-      <div class="team-col">
-        <span class="score-chip score-chip-t0" id="score-t0">Team 0: 0</span>
-        <span id="stats-t0" class="team-stats t0">T0: 0📇 0♦ 0⭐</span>
-      </div>
-      <div class="team-col">
-        <span class="score-chip score-chip-t1" id="score-t1">Team 1: 0</span>
-        <span id="stats-t1" class="team-stats t1">T1: 0📇 0♦ 0⭐</span>
-      </div>
-    </div>
-    <div class="topbar-right">
-      <span id="hand-indicator">Hand 1/4</span>
-      <span id="room-badge" style="display:none;"></span>
-    </div>
-  </div>
-
-  <!-- Board -->
+  <!-- The felt fills the screen; the four hands sit on its edges -->
   <div id="board">
-    <!-- P2 top (Team 0, partner of P0) -->
-    <div class="seat-panel" id="seat-2">
-      <div class="seat-header">
-        <span class="team-badge team0">T0</span>
-        <span>P2</span>
-        <span id="taken-2" style="font-size:0.75rem; color:#aaa;"></span>
-        <button class="eye-btn" id="eye-2" onclick="toggleHand(2)">👁</button>
-      </div>
-      <div class="hand-h" id="hand-2"></div>
-      <div id="move-log"></div>
-    </div>
-
-    <!-- P1 left (Team 1) -->
-    <div class="seat-panel" id="seat-1">
-      <div class="seat-header">
-        <span class="team-badge team1">T1</span>
-        <span>P1</span>
-        <button class="eye-btn" id="eye-1" onclick="toggleHand(1)">👁</button>
-      </div>
-      <span id="taken-1" style="font-size:0.75rem; color:#aaa;"></span>
-      <div class="hand-h" id="hand-1"></div>
-    </div>
-
-    <!-- Table -->
     <div id="table-area">
-      <div id="table-label">TABLE</div>
       <div id="table-cards"></div>
       <div id="table-empty">empty</div>
     </div>
+    <div id="move-log"></div>
 
-    <!-- P3 right (Team 1) -->
-    <div class="seat-panel" id="seat-3">
-      <div class="seat-header">
-        <span class="team-badge team1">T1</span>
-        <span>P3</span>
-        <button class="eye-btn" id="eye-3" onclick="toggleHand(3)">👁</button>
+    <div class="seat-panel" id="seat-2">
+      <div class="hand-h" id="hand-2"></div>
+      <div class="seat-tag">
+        <span class="team-badge team0">T0</span><span>P2</span><span id="taken-2"></span>
+        <button class="eye-btn" id="eye-2" onclick="toggleHand(2)">👁</button>
       </div>
-      <span id="taken-3" style="font-size:0.75rem; color:#aaa;"></span>
-      <div class="hand-h" id="hand-3"></div>
     </div>
 
-    <!-- P0 bottom (Team 0, human by default) -->
+    <div class="seat-panel" id="seat-1">
+      <div class="hand-h" id="hand-1"></div>
+      <div class="seat-tag">
+        <span class="team-badge team1">T1</span><span>P1</span><span id="taken-1"></span>
+        <button class="eye-btn" id="eye-1" onclick="toggleHand(1)">👁</button>
+      </div>
+    </div>
+
+    <div class="seat-panel" id="seat-3">
+      <div class="hand-h" id="hand-3"></div>
+      <div class="seat-tag">
+        <span class="team-badge team1">T1</span><span>P3</span><span id="taken-3"></span>
+        <button class="eye-btn" id="eye-3" onclick="toggleHand(3)">👁</button>
+      </div>
+    </div>
+
     <div class="seat-panel" id="seat-0">
-      <div class="seat-header">
-        <span class="team-badge team0">T0</span>
-        <span>P0</span>
-        <span id="taken-0" style="font-size:0.75rem; color:#aaa;"></span>
+      <div class="seat-tag">
+        <span class="team-badge team0">T0</span><span>P0</span><span class="turn-hint">· your turn</span><span id="taken-0"></span>
         <button class="eye-btn" id="eye-0" onclick="toggleHand(0)">👁</button>
       </div>
       <div class="hand-h" id="hand-0"></div>
     </div>
+
+    <button class="float-btn" id="topbar-menu-btn" onclick="toggleMenu()" aria-label="Menu">☰</button>
+    <button class="float-btn" id="info-btn" onclick="toggleInfo(event)" aria-label="Match info">ⓘ</button>
+    <div id="info-panel">
+      <div class="info-head"><span id="hand-indicator">Hand 1/4</span><span id="room-badge" style="display:none;"></span></div>
+      <table class="info-table">
+        <thead><tr><th></th><th>Score</th><th>Cards</th><th class="sicon" title="Denari">__DENARI__</th><th>Scope</th></tr></thead>
+        <tbody>
+          <tr><td class="t0">Team 0</td><td id="score-t0" class="score-chip">0</td><td id="c-t0">0</td><td id="d-t0">0</td><td id="sc-t0">0</td></tr>
+          <tr><td class="t1">Team 1</td><td id="score-t1" class="score-chip">0</td><td id="c-t1">0</td><td id="d-t1">0</td><td id="sc-t1">0</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 
-  <!-- Controls -->
+  <!-- Controls (watch mode only) -->
   <div id="controls">
     <div id="ctrl-buttons">
       <button class="ctrl-btn" id="btn-next" onclick="nextMove()">Next Move</button>
