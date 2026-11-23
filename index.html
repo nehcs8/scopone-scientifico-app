@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>Scopone Scientifico</title>
 <meta name="description" content="Traditional Italian card game with AI opponents and online multiplayer">
 <meta name="theme-color" content="#1a4a1a">
@@ -54,6 +54,7 @@
       <button class="pregame-btn green"  onclick="startVsAi('easy')">🐣 Pulcino <small>· Easy</small></button>
       <button class="pregame-btn blue"   onclick="startVsAi('medium')">🦊 Volpe <small>· Medium</small></button>
       <button class="pregame-btn purple" onclick="startVsAi('hard')">🦁 Leone <small>· Hard</small></button>
+      <button class="pregame-btn grey" onclick="openSettings()">⚙ Settings</button>
       <div class="pregame-divider online-only">online</div>
       <button class="pregame-btn green online-only"  onclick="doCreateLobby()">Create Game</button>
       <button class="pregame-btn blue online-only"   onclick="quickWatchAi()">Watch AI Game</button>
@@ -130,20 +131,21 @@
 <div id="app">
   <!-- Top bar -->
   <div id="topbar">
-    <h2>Scopone</h2>
+    <button id="topbar-menu-btn" onclick="toggleMenu()" aria-label="Menu">☰</button>
     <div id="topbar-stats">
-      <div style="display:flex; gap:8px;">
+      <div class="team-col">
         <span class="score-chip score-chip-t0" id="score-t0">Team 0: 0</span>
+        <span id="stats-t0" class="team-stats t0">T0: 0📇 0♦ 0⭐</span>
+      </div>
+      <div class="team-col">
         <span class="score-chip score-chip-t1" id="score-t1">Team 1: 0</span>
+        <span id="stats-t1" class="team-stats t1">T1: 0📇 0♦ 0⭐</span>
       </div>
-      <div id="team-stats" style="display:flex; gap:12px; justify-content:space-around;">
-        <span id="stats-t0" style="color:#6a9aaa;">T0: 0📇 0♦ 0⭐</span>
-        <span id="stats-t1" style="color:#aa6a6a;">T1: 0📇 0♦ 0⭐</span>
-      </div>
-      <span id="hand-indicator" style="color:#888; font-size:0.6rem; text-align:center;">Hand 1/4</span>
     </div>
-    <button id="topbar-menu-btn" onclick="toggleMenu()">☰</button>
-    <span id="room-badge" style="display:none;"></span>
+    <div class="topbar-right">
+      <span id="hand-indicator">Hand 1/4</span>
+      <span id="room-badge" style="display:none;"></span>
+    </div>
   </div>
 
   <!-- Board -->
@@ -211,12 +213,39 @@
 </div>
 
 <!-- ── Menu Modal ───────────────────────────────────────────────────────── -->
-<div id="menu-modal">
+<div id="menu-modal" class="modal">
   <div id="menu-box">
     <h3>Menu</h3>
     <button onclick="toggleMenu()">Resume Game</button>
+    <button onclick="toggleMenu(); openSettings();">⚙ Settings</button>
     <button onclick="showSetup(); toggleMenu();">New Game</button>
-    <button onclick="backToMainMenu(); toggleMenu();">Main Menu</button>
+    <button class="secondary" onclick="backToMainMenu(); toggleMenu();">Main Menu</button>
+  </div>
+</div>
+
+<!-- ── Settings Modal ───────────────────────────────────────────────────── -->
+<div id="settings-modal" class="modal">
+  <div id="settings-box">
+    <h3>Settings</h3>
+    <div class="set-row">
+      <div class="set-label">Text size</div>
+      <div class="seg" data-setting="textScale">
+        <button data-v="0.9">S</button><button data-v="1">M</button><button data-v="1.2">L</button><button data-v="1.4">XL</button>
+      </div>
+    </div>
+    <div class="set-row">
+      <div class="set-label">Card size</div>
+      <div class="seg" data-setting="cardScale">
+        <button data-v="0.85">S</button><button data-v="1">M</button><button data-v="1.2">L</button><button data-v="1.4">XL</button>
+      </div>
+    </div>
+    <div class="set-row">
+      <div class="set-label">Suggestions<small>Highlight playable cards and show turn hints</small></div>
+      <div class="seg" data-setting="hints">
+        <button data-v="true">On</button><button data-v="false">Off</button>
+      </div>
+    </div>
+    <button class="set-done" onclick="closeSettings()">Done</button>
   </div>
 </div>
 
